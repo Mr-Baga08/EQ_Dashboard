@@ -1,0 +1,196 @@
+# infra/k8s/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trading-platform-ingress
+  namespace: trading-platform
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # Enable CORS
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - yourdomain.com
+    - api.yourdomain.com
+    secretName: trading-platform-tls
+  rules:
+  # Frontend routes
+  - host: yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 3000
+  
+  # API routes
+  - host: api.yourdomain.com
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 8000
+      - path: /health
+        pathType: Exact
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 8000
+      - path: /ws
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 8000
+
+---
+# Certificate issuer for Let's Encrypt
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@yourdomain.com  # Replace with your email
+    privateKeySecretRef:
+      name: letsencrypt-prod
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+
+---
+# Network Policy for enhanced security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: trading-platform-network-policy
+  namespace: trading-platform
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from nginx ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8000
+    - protocol: TCP
+      port: 3000
+  # Allow communication between pods in the same namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: trading-platform
+    ports:
+    - protocol: TCP
+      port: 8000
+    - protocol: TCP
+      port: 3000
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow HTTPS traffic (for API calls)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow HTTP traffic (for health checks)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 80
+  # Allow communication within namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: trading-platform
+    ports:
+    - protocol: TCP
+      port: 8000
+    - protocol: TCP
+      port: 3000
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+
+---
+# Service Monitor for Prometheus monitoring (optional)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: trading-platform-monitor
+  namespace: trading-platform
+  labels:
+    app: trading-platform
+spec:
+  selector:
+    matchLabels:
+      app: backend
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+# Pod Disruption Budget for high availability
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: backend-pdb
+  namespace: trading-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: backend
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend-pdb
+  namespace: trading-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: frontend

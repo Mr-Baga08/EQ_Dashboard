@@ -1,0 +1,143 @@
+# infra/k8s/backend.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: trading-platform
+data:
+  POSTGRES_SERVER: postgres-service
+  POSTGRES_DB: trading_platform
+  POSTGRES_USER: trading_user
+  REDIS_HOST: redis-service
+  DEBUG: "false"
+  MOTILAL_BASE_URL: "https://openapi.motilaloswal.com"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-secret
+  namespace: trading-platform
+type: Opaque
+data:
+  POSTGRES_PASSWORD: dHJhZGluZ19wYXNzd29yZA== # base64 encoded 'trading_password'
+  SECRET_KEY: eW91ci1zdXBlci1zZWNyZXQta2V5LWNoYW5nZS1pbi1wcm9kdWN0aW9uLW1pbi0zMi1jaGFycw== # base64 encoded secret key
+  MOTILAL_API_KEY: eW91ci1tb3RpbGFsLWFwaS1rZXktaGVyZQ== # base64 encoded API key
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-data-pvc
+  namespace: trading-platform
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: trading-platform
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: trading-platform/backend:latest
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: backend-config
+        - secretRef:
+            name: backend-secret
+        volumeMounts:
+        - name: data-storage
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: backend-data-pvc
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: trading-platform
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: trading-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

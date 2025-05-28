@@ -95,8 +95,8 @@ class MotilalService:
             logger.error(f"Error logging in client {client.motilal_client_id}: {str(e)}")
             return {"status": "FAILED", "message": str(e)}
     
-    async def get_client_profile(self, client: Client) -> Dict[str, Any]:
-        """Get client profile from Motilal API"""
+    async def get_margin_summary(self, client: Client) -> Dict[str, Any]:
+        """Get margin summary from Motilal API"""
         try:
             auth_token = self.auth_tokens.get(client.motilal_client_id)
             if not auth_token:
@@ -106,18 +106,155 @@ class MotilalService:
                 auth_token = self.auth_tokens.get(client.motilal_client_id)
             
             session = await self.get_session()
-            url = f"{self.base_url}/rest/login/v1/getprofile"
+            url = f"{self.base_url}/rest/report/v1/getreportmarginsummary"
             headers = self._get_headers(client, auth_token)
             
-            profile_data = {"clientcode": client.motilal_client_id}
+            margin_data = {"clientcode": client.motilal_client_id}
             
-            async with session.post(url, headers=headers, json=profile_data) as response:
+            async with session.post(url, headers=headers, json=margin_data) as response:
                 result = await response.json()
                 return result
                 
         except Exception as e:
-            logger.error(f"Error fetching profile for client {client.motilal_client_id}: {str(e)}")
+            logger.error(f"Error fetching margin for client {client.motilal_client_id}: {str(e)}")
             return {"status": "FAILED", "message": str(e)}
+    
+    def _extract_available_funds(self, margin_summary: Dict[str, Any]) -> float:
+        """Extract available funds from margin summary response"""
+        try:
+            if margin_summary.get("status") != "SUCCESS":
+                return 0.0
+            
+            margin_data = margin_summary.get("data", [])
+            if not isinstance(margin_data, list):
+                return 0.0
+            
+            # Look for Total Available Margin for Cash (srno: 102)
+            # or Total Available Margin (srno: 100)
+            available_funds = 0.0
+            
+            for item in margin_data:
+                if isinstance(item, dict):
+                    srno = item.get("srno")
+                    particulars = item.get("particulars", "").lower()
+                    amount = item.get("amount", 0)
+                    
+                    # Priority mapping based on Motilal API response structure
+                    if srno == 102 or "total available margin for cash" in particulars:
+                        available_funds = float(amount)
+                        break
+                    elif srno == 100 or "total available margin" in particulars:
+                        available_funds = float(amount)
+                    elif "cash balance" in particulars and "ledger balance" in particulars:
+                        # Fallback to cash balance if available margin not found
+                        if available_funds == 0.0:
+                            available_funds = float(amount)
+            
+            return available_funds
+            
+        except Exception as e:
+            logger.error(f"Error extracting available funds: {str(e)}")
+            return 0.0
+    
+    def _extract_margin_used(self, margin_summary: Dict[str, Any]) -> float:
+        """Extract margin used from margin summary response"""
+        try:
+            if margin_summary.get("status") != "SUCCESS":
+                return 0.0
+            
+            margin_data = margin_summary.get("data", [])
+            if not isinstance(margin_data, list):
+                return 0.0
+            
+            margin_used = 0.0
+            
+            for item in margin_data:
+                if isinstance(item, dict):
+                    srno = item.get("srno")
+                    particulars = item.get("particulars", "").lower()
+                    amount = item.get("amount", 0)
+                    
+                    # Look for Margin Usage Details (srno: 300)
+                    if srno == 300 or "margin usage details" in particulars:
+                        margin_used = float(amount)
+                        break
+                    elif "margin usage" in particulars:
+                        margin_used = float(amount)
+            
+            return margin_used
+            
+        except Exception as e:
+            logger.error(f"Error extracting margin used: {str(e)}")
+            return 0.0
+    
+    def _extract_total_pnl(self, positions: Dict[str, Any]) -> float:
+        """Extract total P&L from positions data"""
+        try:
+            if positions.get("status") != "SUCCESS":
+                return 0.0
+            
+            positions_data = positions.get("data", [])
+            if not isinstance(positions_data, list):
+                return 0.0
+            
+            total_pnl = 0.0
+            
+            for position in positions_data:
+                if isinstance(position, dict):
+                    # Add both mark-to-market and booked P&L
+                    mtm = float(position.get("marktomarket", 0))
+                    booked = float(position.get("bookedprofitloss", 0))
+                    total_pnl += mtm + booked
+            
+            return total_pnl
+            
+        except Exception as e:
+            logger.error(f"Error extracting total P&L: {str(e)}")
+            return 0.0
+    
+    async def get_client_financial_summary(self, client: Client) -> Dict[str, float]:
+        """Get comprehensive financial summary for a client"""
+        try:
+            # Fetch margin summary and positions concurrently
+            margin_task = self.get_margin_summary(client)
+            positions_task = self.get_client_positions(client)
+            
+            margin_summary, positions = await asyncio.gather(
+                margin_task, positions_task, return_exceptions=True
+            )
+            
+            # Handle exceptions
+            if isinstance(margin_summary, Exception):
+                logger.error(f"Error fetching margin summary: {margin_summary}")
+                margin_summary = {"status": "FAILED"}
+            
+            if isinstance(positions, Exception):
+                logger.error(f"Error fetching positions: {positions}")
+                positions = {"status": "FAILED"}
+            
+            # Extract financial data
+            available_funds = self._extract_available_funds(margin_summary)
+            margin_used = self._extract_margin_used(margin_summary)
+            total_pnl = self._extract_total_pnl(positions)
+            
+            # Calculate margin available (should be same as available funds in most cases)
+            margin_available = available_funds
+            
+            return {
+                "available_funds": available_funds,
+                "margin_used": margin_used,
+                "margin_available": margin_available,
+                "total_pnl": total_pnl
+            }
+            
+        except Exception as e:
+            logger.error(f"Error getting financial summary for client {client.motilal_client_id}: {str(e)}")
+            return {
+                "available_funds": 0.0,
+                "margin_used": 0.0,
+                "margin_available": 0.0,
+                "total_pnl": 0.0
+            }
     
     async def get_client_positions(self, client: Client) -> Dict[str, Any]:
         """Get client positions from Motilal API"""
@@ -143,8 +280,8 @@ class MotilalService:
             logger.error(f"Error fetching positions for client {client.motilal_client_id}: {str(e)}")
             return {"status": "FAILED", "message": str(e)}
     
-    async def get_margin_summary(self, client: Client) -> Dict[str, Any]:
-        """Get margin summary from Motilal API"""
+    async def get_client_profile(self, client: Client) -> Dict[str, Any]:
+        """Get client profile from Motilal API"""
         try:
             auth_token = self.auth_tokens.get(client.motilal_client_id)
             if not auth_token:
@@ -154,17 +291,17 @@ class MotilalService:
                 auth_token = self.auth_tokens.get(client.motilal_client_id)
             
             session = await self.get_session()
-            url = f"{self.base_url}/rest/report/v1/getreportmarginsummary"
+            url = f"{self.base_url}/rest/login/v1/getprofile"
             headers = self._get_headers(client, auth_token)
             
-            margin_data = {"clientcode": client.motilal_client_id}
+            profile_data = {"clientcode": client.motilal_client_id}
             
-            async with session.post(url, headers=headers, json=margin_data) as response:
+            async with session.post(url, headers=headers, json=profile_data) as response:
                 result = await response.json()
                 return result
                 
         except Exception as e:
-            logger.error(f"Error fetching margin for client {client.motilal_client_id}: {str(e)}")
+            logger.error(f"Error fetching profile for client {client.motilal_client_id}: {str(e)}")
             return {"status": "FAILED", "message": str(e)}
     
     async def place_order(

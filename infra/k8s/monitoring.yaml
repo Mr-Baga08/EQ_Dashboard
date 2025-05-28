@@ -1,0 +1,314 @@
+# infra/k8s/monitoring.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: trading-platform
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    
+    rule_files:
+      - "alert_rules.yml"
+    
+    scrape_configs:
+      - job_name: 'trading-platform-backend'
+        static_configs:
+          - targets: ['backend-service:8000']
+        metrics_path: /metrics
+        scrape_interval: 30s
+      
+      - job_name: 'trading-platform-postgres'
+        static_configs:
+          - targets: ['postgres-service:5432']
+        scrape_interval: 30s
+      
+      - job_name: 'trading-platform-redis'
+        static_configs:
+          - targets: ['redis-service:6379']
+        scrape_interval: 30s
+    
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+
+  alert_rules.yml: |
+    groups:
+    - name: trading-platform-alerts
+      rules:
+      - alert: HighCPUUsage
+        expr: rate(container_cpu_usage_seconds_total[5m]) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage detected"
+          description: "CPU usage is above 80% for more than 5 minutes"
+      
+      - alert: HighMemoryUsage
+        expr: container_memory_usage_bytes / container_spec_memory_limit_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage detected"
+          description: "Memory usage is above 90% for more than 5 minutes"
+      
+      - alert: PodCrashLooping
+        expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pod is crash looping"
+          description: "Pod {{ $labels.pod }} is restarting frequently"
+      
+      - alert: DatabaseConnectionFailed
+        expr: up{job="trading-platform-postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection failed"
+          description: "PostgreSQL database is not responding"
+      
+      - alert: RedisConnectionFailed
+        expr: up{job="trading-platform-redis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis connection failed"
+          description: "Redis cache is not responding"
+      
+      - alert: BackendServiceDown
+        expr: up{job="trading-platform-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Backend service is down"
+          description: "Backend API service is not responding"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: trading-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        ports:
+        - containerPort: 9090
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/prometheus
+        - name: storage-volume
+          mountPath: /prometheus
+        command:
+        - '/bin/prometheus'
+        - '--config.file=/etc/prometheus/prometheus.yml'
+        - '--storage.tsdb.path=/prometheus'
+        - '--web.console.libraries=/etc/prometheus/console_libraries'
+        - '--web.console.templates=/etc/prometheus/consoles'
+        - '--storage.tsdb.retention.time=200h'
+        - '--web.enable-lifecycle'
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: config-volume
+        configMap:
+          name: prometheus-config
+      - name: storage-volume
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: trading-platform
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: trading-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "admin123"
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-kubernetes-app"
+        volumeMounts:
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "125m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+      volumes:
+      - name: grafana-storage
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana-service
+  namespace: trading-platform
+spec:
+  selector:
+    app: grafana
+  ports:
+  - port: 3000
+    targetPort: 3000
+  type: ClusterIP
+
+---
+# Elasticsearch for log aggregation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  namespace: trading-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:7.15.0
+        ports:
+        - containerPort: 9200
+        - containerPort: 9300
+        env:
+        - name: discovery.type
+          value: "single-node"
+        - name: ES_JAVA_OPTS
+          value: "-Xms512m -Xmx512m"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: elasticsearch-storage
+          mountPath: /usr/share/elasticsearch/data
+      volumes:
+      - name: elasticsearch-storage
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-service
+  namespace: trading-platform
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+  - port: 9200
+    targetPort: 9200
+  type: ClusterIP
+
+---
+# Kibana for log visualization
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kibana
+  namespace: trading-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kibana
+  template:
+    metadata:
+      labels:
+        app: kibana
+    spec:
+      containers:
+      - name: kibana
+        image: docker.elastic.co/kibana/kibana:7.15.0
+        ports:
+        - containerPort: 5601
+        env:
+        - name: ELASTICSEARCH_HOSTS
+          value: "http://elasticsearch-service:9200"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kibana-service
+  namespace: trading-platform
+spec:
+  selector:
+    app: kibana
+  ports:
+  - port: 5601
+    targetPort: 5601
+  type: ClusterIP
