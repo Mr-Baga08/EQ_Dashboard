@@ -1,5 +1,5 @@
 # backend/app/models/trade.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Enum
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Enum, Text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.core.database import Base
@@ -14,6 +14,7 @@ class TradeStatus(enum.Enum):
     ACTIVE = "ACTIVE"
     CLOSED = "CLOSED"
     PENDING = "PENDING"
+    CANCELLED = "CANCELLED"
 
 class ExecutionType(enum.Enum):
     BUY = "BUY"
@@ -48,9 +49,17 @@ class Trade(Base):
     margin_required = Column(Float, default=0.0)
     margin_blocked = Column(Float, default=0.0)
     
+    # Order execution details
+    executed_quantity = Column(Integer, default=0)
+    pending_quantity = Column(Integer, default=0)
+    
     # Motilal API Response
     motilal_order_id = Column(String(100))
-    motilal_response = Column(String(1000))
+    motilal_response = Column(Text)
+    
+    # Risk management
+    stop_loss = Column(Float, nullable=True)
+    target = Column(Float, nullable=True)
     
     # Timestamps
     entry_time = Column(DateTime(timezone=True), server_default=func.now())
